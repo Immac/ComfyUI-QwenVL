@@ -11,6 +11,7 @@ Pillow
 opencv-python
 bitsandbytes
 accelerate
+requests
 
 # For running GGUF models with vision support
 

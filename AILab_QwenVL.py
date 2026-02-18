@@ -17,6 +17,8 @@ import gc
 import json
 import os
 import platform
+import sys
+import time
 from enum import Enum
 from pathlib import Path
 
@@ -24,7 +26,7 @@ import numpy as np
 import psutil
 import torch
 from PIL import Image
-from huggingface_hub import snapshot_download
+from huggingface_hub import HfApi, hf_hub_download, hf_hub_url, snapshot_download
 try:
     from transformers import AutoModelForImageTextToText as AutoModelForVision2Seq
 except ImportError:
@@ -33,6 +35,30 @@ from transformers import AutoProcessor, AutoTokenizer, BitsAndBytesConfig
 
 import folder_paths
 from comfy.utils import ProgressBar
+
+try:
+    import requests
+except ImportError:
+    requests = None
+
+try:
+    from huggingface_hub import get_token as _hf_get_token
+except Exception:
+    try:
+        from huggingface_hub.utils import get_token as _hf_get_token
+    except Exception:
+        _hf_get_token = None
+
+
+def _resolve_hf_token() -> str | None:
+    if _hf_get_token is not None:
+        try:
+            token = _hf_get_token()
+            if token:
+                return token
+        except Exception:
+            pass
+    return os.getenv("HF_TOKEN") or os.getenv("HUGGINGFACEHUB_API_TOKEN")
 
 # SageAttention support
 try:
@@ -89,6 +115,209 @@ class Quantization(str, Enum):
         raise ValueError(f"Unsupported quantization: {value}")
 
 ATTENTION_MODES = ["auto", "sage", "flash_attention_2", "sdpa"]
+
+
+def _format_download_progress(done: int, total: int, width: int = 26) -> str:
+    total = max(total, 1)
+    done = max(0, min(done, total))
+    ratio = done / total
+    filled = int(width * ratio)
+    bar = "█" * filled + "░" * (width - filled)
+    return f"[{bar}] {ratio * 100:5.1f}% ({done}/{total} files)"
+
+
+def _should_ignore_repo_file(path: str) -> bool:
+    if not path:
+        return True
+    path_lower = path.lower()
+    if path_lower.endswith(".md"):
+        return True
+    if path.startswith(".git") or "/.git" in path:
+        return True
+    return False
+
+
+def _download_repo_with_progress(repo_id: str, target_dir: Path):
+    api = HfApi()
+    try:
+        repo_files = api.list_repo_files(repo_id=repo_id, repo_type="model")
+    except Exception as exc:
+        print(f"[QwenVL] Could not list files for progress display: {exc}")
+        snapshot_download(
+            repo_id=repo_id,
+            local_dir=str(target_dir),
+            local_dir_use_symlinks=False,
+            ignore_patterns=["*.md", ".git*"],
+        )
+        return
+
+    files_to_download = [path for path in repo_files if not _should_ignore_repo_file(path)]
+    if not files_to_download:
+        snapshot_download(
+            repo_id=repo_id,
+            local_dir=str(target_dir),
+            local_dir_use_symlinks=False,
+            ignore_patterns=["*.md", ".git*"],
+        )
+        return
+
+    total = len(files_to_download)
+    pbar = ProgressBar(total)
+    print(f"[QwenVL] Downloading {repo_id}: {_format_download_progress(0, total)}")
+
+    for idx, filename in enumerate(files_to_download, start=1):
+        local_path = target_dir / filename
+        if not local_path.exists():
+            _stream_hf_file_with_percent(
+                repo_id=repo_id,
+                filename=filename,
+                target_path=local_path,
+                repo_type="model",
+            )
+        pbar.update_absolute(idx, total, None)
+        print(f"[QwenVL] Downloading {repo_id}: {_format_download_progress(idx, total)}")
+
+    print(f"[QwenVL] Download complete: {repo_id}")
+
+
+def _stream_hf_file_with_percent(
+    repo_id: str,
+    filename: str,
+    target_path: Path,
+    repo_type: str = "model",
+    chunk_size: int = 1024 * 1024,
+):
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    if target_path.exists():
+        return
+
+    if requests is None:
+        print(f"[QwenVL] requests not available, using hf_hub_download for {filename}")
+        downloaded = hf_hub_download(
+            repo_id=repo_id,
+            filename=filename,
+            repo_type=repo_type,
+            local_dir=str(target_path.parent),
+            local_dir_use_symlinks=False,
+        )
+        downloaded_path = Path(downloaded)
+        if downloaded_path.exists() and downloaded_path.resolve() != target_path.resolve():
+            downloaded_path.replace(target_path)
+        return
+
+    token = _resolve_hf_token()
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    url = hf_hub_url(repo_id=repo_id, filename=filename, repo_type=repo_type)
+    tmp_path = target_path.with_suffix(target_path.suffix + ".part")
+
+    def _fmt_eta(seconds: float) -> str:
+        seconds = max(int(seconds), 0)
+        mins, secs = divmod(seconds, 60)
+        hours, mins = divmod(mins, 60)
+        if hours > 0:
+            return f"{hours:d}:{mins:02d}:{secs:02d}"
+        return f"{mins:02d}:{secs:02d}"
+
+    file_label = Path(filename).name
+    use_inline = bool(getattr(sys.stdout, "isatty", lambda: False)())
+    last_render_len = 0
+
+    def _emit_progress(message: str, done: bool = False):
+        nonlocal last_render_len
+        if use_inline:
+            pad = " " * max(0, last_render_len - len(message))
+            print(f"\r{message}{pad}", end="\n" if done else "", flush=True)
+            last_render_len = 0 if done else len(message)
+            return
+        print(message)
+
+    try:
+        with requests.get(url, headers=headers, stream=True, timeout=(15, 600)) as response:
+            response.raise_for_status()
+            total_bytes = int(response.headers.get("Content-Length") or response.headers.get("content-length") or 0)
+
+            file_pbar = ProgressBar(1000)
+            downloaded = 0
+            last_percent_bucket = -1
+            last_log_time = 0.0
+            total_mb = total_bytes / (1024 * 1024) if total_bytes > 0 else 0.0
+            start_time = time.time()
+            last_sample_time = start_time
+            ema_speed_mbs = 0.0
+            ema_alpha = 0.2
+
+            with open(tmp_path, "wb") as handle:
+                for chunk in response.iter_content(chunk_size=chunk_size):
+                    if not chunk:
+                        continue
+                    handle.write(chunk)
+                    downloaded += len(chunk)
+                    now = time.time()
+                    delta_t = max(now - last_sample_time, 1e-6)
+                    inst_speed_mbs = (len(chunk) / (1024 * 1024)) / delta_t
+                    ema_speed_mbs = inst_speed_mbs if ema_speed_mbs <= 0 else (ema_alpha * inst_speed_mbs + (1 - ema_alpha) * ema_speed_mbs)
+                    last_sample_time = now
+
+                    if total_bytes > 0:
+                        pct = min(100.0, (downloaded / total_bytes) * 100.0)
+                        percent_bucket = int(pct * 10)
+                        should_log = (
+                            percent_bucket != last_percent_bucket
+                            and pct < 100.0
+                            and (
+                                (now - last_log_time >= 0.5)
+                                if use_inline
+                                else (percent_bucket % 50 == 0 or now - last_log_time >= 5.0)
+                            )
+                        )
+                        if should_log:
+                            downloaded_mb = downloaded / (1024 * 1024)
+                            avg_speed_mbs = downloaded_mb / max(now - start_time, 1e-6)
+                            speed_mbs = ema_speed_mbs if ema_speed_mbs > 0 else avg_speed_mbs
+                            remaining_mb = max(total_mb - downloaded_mb, 0.0)
+                            eta_seconds = remaining_mb / speed_mbs if speed_mbs > 0 else 0.0
+                            _emit_progress(
+                                f"[QwenVL] {file_label}: {pct:5.1f}% "
+                                f"({downloaded_mb:.1f}/{total_mb:.1f} MB) - "
+                                f"{speed_mbs:.1f} MB/s - ETA {_fmt_eta(eta_seconds)}"
+                            )
+                            last_log_time = now
+                        if percent_bucket != last_percent_bucket:
+                            file_pbar.update_absolute(percent_bucket, 1000, None)
+                            last_percent_bucket = percent_bucket
+
+            file_pbar.update_absolute(1000, 1000, None)
+            if total_bytes > 0:
+                elapsed = max(time.time() - start_time, 1e-6)
+                avg_speed_mbs = total_mb / elapsed if elapsed > 0 else 0.0
+                final_speed_mbs = ema_speed_mbs if ema_speed_mbs > 0 else avg_speed_mbs
+                _emit_progress(
+                    f"[QwenVL] {file_label}: 100.0% "
+                    f"({total_mb:.1f}/{total_mb:.1f} MB) - {final_speed_mbs:.1f} MB/s - ETA 00:00"
+                    ,
+                    done=True,
+                )
+    except Exception as exc:
+        if use_inline and last_render_len > 0:
+            print()
+        if tmp_path.exists():
+            tmp_path.unlink(missing_ok=True)
+        print(f"[QwenVL] Streaming download failed for {filename}, fallback to hf_hub_download: {exc}")
+        downloaded = hf_hub_download(
+            repo_id=repo_id,
+            filename=filename,
+            repo_type=repo_type,
+            local_dir=str(target_path.parent),
+            local_dir_use_symlinks=False,
+        )
+        downloaded_path = Path(downloaded)
+        if downloaded_path.exists() and downloaded_path.resolve() != target_path.resolve():
+            downloaded_path.replace(target_path)
+        return
+
+    if not tmp_path.exists():
+        raise FileNotFoundError(f"[QwenVL] Download temp file missing for {filename}")
+    tmp_path.replace(target_path)
 
 def load_model_configs():
     global HF_VL_MODELS, HF_TEXT_MODELS, HF_ALL_MODELS, SYSTEM_PROMPTS, PRESET_PROMPTS
@@ -473,12 +702,7 @@ def ensure_model(model_name):
         if any(target.glob("*.safetensors")) or any(target.glob("*.bin")):
             return str(target)
 
-    snapshot_download(
-        repo_id=repo_id,
-        local_dir=str(target),
-        local_dir_use_symlinks=False,
-        ignore_patterns=["*.md", ".git*"],
-    )
+    _download_repo_with_progress(repo_id=repo_id, target_dir=target)
     return str(target)
 
 def enforce_memory(model_name, quantization, device_info):
