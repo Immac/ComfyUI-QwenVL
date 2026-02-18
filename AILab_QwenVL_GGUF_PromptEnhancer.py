@@ -403,7 +403,15 @@ class AILab_QwenVL_GGUF_PromptEnhancer:
         attempted = []
         total_attempts = max(len(repo_ids), 1)
         pbar = ProgressBar(total_attempts)
-        print(f"[QwenVL] Download attempts: {_format_download_progress(0, total_attempts)}")
+        last_render_len = 0
+
+        def _emit_attempt_progress(message: str, done: bool = False):
+            nonlocal last_render_len
+            pad = " " * max(0, last_render_len - len(message))
+            print(f"\r{message}{pad}", end="\n" if done else "", flush=True)
+            last_render_len = 0 if done else len(message)
+
+        _emit_attempt_progress(f"[QwenVL] Download attempts: {_format_download_progress(0, total_attempts)}")
 
         for idx, repo_id in enumerate(repo_ids, start=1):
             attempted.append(repo_id)
@@ -414,7 +422,7 @@ class AILab_QwenVL_GGUF_PromptEnhancer:
             except Exception as exc:
                 print(f"[QwenVL] hf_hub_download failed from {repo_id}: {exc}")
             finally:
-                print(f"[QwenVL] Download attempts: {_format_download_progress(idx, total_attempts)}")
+                _emit_attempt_progress(f"[QwenVL] Download attempts: {_format_download_progress(idx, total_attempts)}")
             if resolved.exists():
                 break
             try:
@@ -435,6 +443,7 @@ class AILab_QwenVL_GGUF_PromptEnhancer:
                 resolved.parent.mkdir(parents=True, exist_ok=True)
                 found[0].replace(resolved)
                 break
+        _emit_attempt_progress(f"[QwenVL] Download attempts: {_format_download_progress(total_attempts, total_attempts)}", done=True)
         if not resolved.exists():
             raise FileNotFoundError(f"[QwenVL] GGUF model not found after download: {resolved} (tried: {', '.join(attempted)})")
 

@@ -163,7 +163,15 @@ def _download_repo_with_progress(repo_id: str, target_dir: Path):
 
     total = len(files_to_download)
     pbar = ProgressBar(total)
-    print(f"[QwenVL] Downloading {repo_id}: {_format_download_progress(0, total)}")
+    last_render_len = 0
+
+    def _emit_overall_progress(message: str, done: bool = False):
+        nonlocal last_render_len
+        pad = " " * max(0, last_render_len - len(message))
+        print(f"\r{message}{pad}", end="\n" if done else "", flush=True)
+        last_render_len = 0 if done else len(message)
+
+    _emit_overall_progress(f"[QwenVL] Downloading {repo_id}: {_format_download_progress(0, total)}")
 
     for idx, filename in enumerate(files_to_download, start=1):
         local_path = target_dir / filename
@@ -175,8 +183,9 @@ def _download_repo_with_progress(repo_id: str, target_dir: Path):
                 repo_type="model",
             )
         pbar.update_absolute(idx, total, None)
-        print(f"[QwenVL] Downloading {repo_id}: {_format_download_progress(idx, total)}")
+        _emit_overall_progress(f"[QwenVL] Downloading {repo_id}: {_format_download_progress(idx, total)}")
 
+    _emit_overall_progress(f"[QwenVL] Downloading {repo_id}: {_format_download_progress(total, total)}", done=True)
     print(f"[QwenVL] Download complete: {repo_id}")
 
 

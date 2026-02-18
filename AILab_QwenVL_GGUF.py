@@ -266,7 +266,15 @@ def _download_single_file(repo_ids: list[str], filename: str, target_path: Path)
     last_exc: Exception | None = None
     total_attempts = max(len(repo_ids), 1)
     pbar = ProgressBar(total_attempts)
-    print(f"[QwenVL] Download attempts: {_format_download_progress(0, total_attempts)}")
+    last_render_len = 0
+
+    def _emit_attempt_progress(message: str, done: bool = False):
+        nonlocal last_render_len
+        pad = " " * max(0, last_render_len - len(message))
+        print(f"\r{message}{pad}", end="\n" if done else "", flush=True)
+        last_render_len = 0 if done else len(message)
+
+    _emit_attempt_progress(f"[QwenVL] Download attempts: {_format_download_progress(0, total_attempts)}")
 
     for idx, repo_id in enumerate(repo_ids, start=1):
         pbar.update_absolute(idx, total_attempts, None)
@@ -280,9 +288,11 @@ def _download_single_file(repo_ids: list[str], filename: str, target_path: Path)
             last_exc = exc
             print(f"[QwenVL] hf_hub_download failed from {repo_id}: {exc}")
         finally:
-            print(f"[QwenVL] Download attempts: {_format_download_progress(idx, total_attempts)}")
+            _emit_attempt_progress(f"[QwenVL] Download attempts: {_format_download_progress(idx, total_attempts)}")
     else:
         raise FileNotFoundError(f"[QwenVL] Download failed for {filename}: {last_exc}")
+
+    _emit_attempt_progress(f"[QwenVL] Download attempts: {_format_download_progress(total_attempts, total_attempts)}", done=True)
 
     if not target_path.exists():
         raise FileNotFoundError(f"[QwenVL] File not found after download: {target_path}")
