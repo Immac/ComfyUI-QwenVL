@@ -5,6 +5,7 @@ The ComfyUI-QwenVL custom node integrates the powerful Qwen-VL series of vision-
 ![QwenVL_V1.1.0](https://github.com/user-attachments/assets/13e89746-a04e-41a3-9026-7079b29e149c)
 
 ## **📰 News & Updates**
+* **2026/02/23**: **v2.2.0** Configurable System Prompts for all QwenVL vision nodes (HF and GGUF). Add a `custom_system_prompts.json` file to override the built-in system prompt presets without touching any core files.
 * **2026/02/08**: **v2.1.1**  Fixed compatibility for  Transformers 4.x and 5.x [[Update](https://github.com/1038lab/ComfyUI-QwenVL/blob/main/update.md#version-211-20260208)]
 
 * **2026/02/05**: **v2.1.0** Added SageAttention support with per-GPU architecture optimization, improved FP8 model handling, and automatic attention mode selection. [[Update](https://github.com/1038lab/ComfyUI-QwenVL/blob/main/update.md#version-210-20260205)]
@@ -51,6 +52,7 @@ The ComfyUI-QwenVL custom node integrates the powerful Qwen-VL series of vision-
 * **SageAttention Support**: GPU-optimized attention mechanism with per-architecture kernels (Ampere, Ada, Hopper, Blackwell).
 * **Progress Bar**: Visual feedback during model loading and generation stages.
 * **Intelligent Cache Management**: Automatically clears VRAM when changing attention modes or quantization settings.
+* **Configurable System Prompts**: Select from preset system prompts or write your own directly in the node. Override presets globally via `custom_system_prompts.json` without modifying any built-in files.
 
 ## **🚀 Installation**
 
@@ -100,7 +102,17 @@ This repo includes **GGUF** nodes powered by `llama-cpp-python` (separate from t
   - `hf_vl_models`: vision-language models (used by QwenVL nodes).  
   - `hf_text_models`: text-only models (used by Prompt Enhancer).  
 - **GGUF models**: `gguf_models.json`  
-- **System prompts**: `AILab_System_Prompts.json` (includes both VL prompts and prompt-enhancer styles).  
+- **System prompts**: `AILab_System_Prompts.json` (includes both VL prompts and prompt-enhancer styles).
+- **Custom system prompts** *(optional)*: `custom_system_prompts.json` — create this file to override the built-in system prompt presets for QwenVL vision nodes. If present it takes full precedence; the original file is never modified. It is `.gitignore`d by default.
+  ```json
+  {
+    "_preset_system_prompts": ["🔍 Default", "🎨 Creative"],
+    "qwenvl_system": {
+      "🔍 Default": "You are a helpful vision-language assistant. Answer directly. No <think>.",
+      "🎨 Creative": "You are a creative vision-language assistant..."
+    }
+  }
+  ```
 
 ## **📥 Download Models**
 
@@ -165,6 +177,8 @@ For more control, use the **"QwenVL (Advanced)"** node. This gives you access to
 | **model\_name** | The Qwen-VL model to use. | Qwen3-VL-4B-Instruct | \- | Standard & Advanced |
 | **quantization** | On-the-fly quantization. Ignored for pre-quantized models (e.g., FP8). | 8-bit (Balanced) | 4-bit, 8-bit, None | Standard & Advanced |
 | **attention\_mode** | Attention mechanism: auto (Sage→Flash→SDPA), sage, flash\_attention\_2, sdpa | auto | auto, sage, flash\_attention\_2, sdpa | Standard & Advanced |
+| **preset\_system\_prompt** | System-level instruction defining the assistant's role and output style. Loaded from `custom_system_prompts.json`. | 🔍 Default | Dropdown | Standard & Advanced |
+| **custom\_system\_prompt** | Free-text system prompt. When filled it completely replaces the preset system prompt. |  | Any text | Standard & Advanced |
 | **preset\_prompt** | A selection of pre-defined prompts for common tasks. | "Describe this..." | Any text | Standard & Advanced |
 | **custom\_prompt** | Overrides the preset prompt if provided. |  | Any text | Standard & Advanced |
 | **max\_tokens** | Maximum number of new tokens to generate. | 1024 | 64-2048 | Standard & Advanced |
@@ -214,6 +228,12 @@ For more control, use the **"QwenVL (Advanced)"** node. This gives you access to
 This node utilizes the Qwen-VL series of models, developed by the Qwen Team at Alibaba Cloud. These are powerful, open-source large vision-language models (LVLMs) designed to understand and process both visual and textual information, making them ideal for tasks like detailed image and video description.
 
 ## **🗺️ Roadmap**
+
+### **✅ Completed (v2.2.0)**
+
+* ✅ Configurable system prompts for all QwenVL vision nodes (HF and GGUF)
+* ✅ `custom_system_prompts.json` override file (`.gitignore`d, backwards compatible)
+* ✅ `preset_system_prompt` dropdown + `custom_system_prompt` free-text field in all vision nodes
 
 ### **✅ Completed (v2.1.0)**
 

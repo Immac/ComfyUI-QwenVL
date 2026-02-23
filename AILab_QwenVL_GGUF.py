@@ -57,7 +57,12 @@ def _resolve_hf_token() -> str | None:
 NODE_DIR = Path(__file__).parent
 CONFIG_PATH = NODE_DIR / "hf_models.json"
 SYSTEM_PROMPTS_PATH = NODE_DIR / "AILab_System_Prompts.json"
+CUSTOM_SYSTEM_PROMPTS_PATH = NODE_DIR / "custom_system_prompts.json"
 GGUF_CONFIG_PATH = NODE_DIR / "gguf_models.json"
+
+_DEFAULT_SYSTEM_PROMPT = "You are a helpful vision-language assistant. Answer directly with the final answer only. No <think> and no reasoning."
+SYSTEM_PROMPT_PRESETS: list[str] = ["🔍 Default"]
+SYSTEM_PROMPT_TEXTS: dict[str, str] = {"🔍 Default": _DEFAULT_SYSTEM_PROMPT}
 
 
 def _load_prompt_config():
@@ -85,6 +90,23 @@ def _load_prompt_config():
         pass
     except Exception as exc:
         print(f"[QwenVL] System prompts load failed: {exc}")
+
+    # Load custom system prompts override
+    if CUSTOM_SYSTEM_PROMPTS_PATH.exists():
+        try:
+            with open(CUSTOM_SYSTEM_PROMPTS_PATH, "r", encoding="utf-8") as fh:
+                sp_data = json.load(fh) or {}
+            custom_sys = sp_data.get("qwenvl_system") or {}
+            preset_sys = sp_data.get("_preset_system_prompts") or []
+            if isinstance(custom_sys, dict) and custom_sys:
+                global SYSTEM_PROMPT_TEXTS
+                SYSTEM_PROMPT_TEXTS = custom_sys
+            if isinstance(preset_sys, list) and preset_sys:
+                global SYSTEM_PROMPT_PRESETS
+                SYSTEM_PROMPT_PRESETS = preset_sys
+            print(f"[QwenVL GGUF] Loaded {len(SYSTEM_PROMPT_TEXTS)} custom system prompts")
+        except Exception as exc:
+            print(f"[QwenVL GGUF] custom_system_prompts.json skipped: {exc}")
 
     return preset_prompts, system_prompts
 
@@ -712,12 +734,18 @@ class QwenVLGGUFBase:
         image_max_tokens: int | None,
         top_k: int | None,
         pool_size: int | None,
+        preset_system_prompt: str = "🔍 Default",
+        custom_system_prompt: str = "",
     ):
         torch.manual_seed(int(seed))
 
         prompt = SYSTEM_PROMPTS.get(preset_prompt, preset_prompt)
         if custom_prompt and custom_prompt.strip():
             prompt = custom_prompt.strip()
+
+        system_prompt = SYSTEM_PROMPT_TEXTS.get(preset_system_prompt, _DEFAULT_SYSTEM_PROMPT)
+        if custom_system_prompt and custom_system_prompt.strip():
+            system_prompt = custom_system_prompt.strip()
 
         images_b64: list[str] = []
         if image is not None:
@@ -744,10 +772,7 @@ class QwenVLGGUFBase:
             if images_b64 and self.chat_handler is None:
                 print("[QwenVL] Warning: images provided but this model entry has no mmproj_file; images will be ignored")
             text = self._invoke(
-                system_prompt=(
-                    "You are a helpful vision-language assistant. "
-                    "Answer directly with the final answer only. No <think> and no reasoning."
-                ),
+                system_prompt=system_prompt,
                 user_prompt=prompt,
                 images_b64=images_b64 if self.chat_handler is not None else [],
                 max_tokens=max_tokens,
@@ -773,9 +798,14 @@ class AILab_QwenVL_GGUF(QwenVLGGUFBase):
         preferred_prompt = "🖼️ Detailed Description"
         default_prompt = preferred_prompt if preferred_prompt in prompts else prompts[0]
 
+        sys_presets = SYSTEM_PROMPT_PRESETS or ["🔍 Default"]
+        default_sys = sys_presets[0]
+
         return {
             "required": {
                 "model_name": (model_keys, {"default": default_model}),
+                "preset_system_prompt": (sys_presets, {"default": default_sys, "tooltip": "System-level instruction defining the assistant's role and output style."}),
+                "custom_system_prompt": ("STRING", {"default": "", "multiline": True, "tooltip": "Optional free-text system prompt. When filled it replaces the preset."}),
                 "preset_prompt": (prompts, {"default": default_prompt}),
                 "custom_prompt": ("STRING", {"default": "", "multiline": True}),
                 "max_tokens": ("INT", {"default": 512, "min": 64, "max": 32768}),
@@ -796,6 +826,8 @@ class AILab_QwenVL_GGUF(QwenVLGGUFBase):
     def process(
         self,
         model_name,
+        preset_system_prompt,
+        custom_system_prompt,
         preset_prompt,
         custom_prompt,
         max_tokens,
@@ -824,6 +856,8 @@ class AILab_QwenVL_GGUF(QwenVLGGUFBase):
             image_max_tokens=None,
             top_k=None,
             pool_size=None,
+            preset_system_prompt=preset_system_prompt,
+            custom_system_prompt=custom_system_prompt,
         )
 
 
@@ -838,6 +872,9 @@ class AILab_QwenVL_GGUF_Advanced(QwenVLGGUFBase):
         preferred_prompt = "🖼️ Detailed Description"
         default_prompt = preferred_prompt if preferred_prompt in prompts else prompts[0]
 
+        sys_presets = SYSTEM_PROMPT_PRESETS or ["🔍 Default"]
+        default_sys = sys_presets[0]
+
         num_gpus = torch.cuda.device_count()
         gpu_list = [f"cuda:{i}" for i in range(num_gpus)]
         device_options = ["auto", "cpu", "mps"] + gpu_list
@@ -846,6 +883,8 @@ class AILab_QwenVL_GGUF_Advanced(QwenVLGGUFBase):
             "required": {
                 "model_name": (model_keys, {"default": default_model}),
                 "device": (device_options, {"default": "auto"}),
+                "preset_system_prompt": (sys_presets, {"default": default_sys, "tooltip": "System-level instruction defining the assistant's role and output style."}),
+                "custom_system_prompt": ("STRING", {"default": "", "multiline": True, "tooltip": "Optional free-text system prompt. When filled it replaces the preset."}),
                 "preset_prompt": (prompts, {"default": default_prompt}),
                 "custom_prompt": ("STRING", {"default": "", "multiline": True}),
                 "max_tokens": ("INT", {"default": 512, "min": 64, "max": 32768}),
@@ -877,6 +916,8 @@ class AILab_QwenVL_GGUF_Advanced(QwenVLGGUFBase):
         self,
         model_name,
         device,
+        preset_system_prompt,
+        custom_system_prompt,
         preset_prompt,
         custom_prompt,
         max_tokens,
@@ -915,6 +956,8 @@ class AILab_QwenVL_GGUF_Advanced(QwenVLGGUFBase):
             image_max_tokens=image_max_tokens,
             top_k=top_k,
             pool_size=pool_size,
+            preset_system_prompt=preset_system_prompt,
+            custom_system_prompt=custom_system_prompt,
         )
 
 
